@@ -344,3 +344,60 @@ def test_restart_check_ignores_a_failed_poll_and_still_advances_on_the_next_succ
     assert first is False
     assert second is True
     assert len(calls) == 2
+
+
+def test_a_restarted_worker_does_not_immediately_restart_again() -> None:
+    """Two consecutive boots against an unchanged relay: the second must run.
+
+    Every test above checks the tracker in isolation, where "a higher version
+    means restart" is correct. The composed property is different and was
+    missing: a worker that exits *because* of a restart directive gets started
+    again, and must not reach the same conclusion from the same unchanged
+    relay. Otherwise it restart-loops and never opens a stream.
+
+    That is exactly what a literal ``RestartDirective(0, 0)`` seed produced.
+    The relay serves ``config_version = registry_version``, which is >= 1 the
+    moment one camera is registered, so every boot saw 0 -> 1 and exited. It
+    measured as 0 frames processed against a real backend while the whole suite
+    stayed green.
+
+    ``worker/__main__.py`` now seeds from the config the process actually
+    booted with, matching the baseline's ``boot_registry_version``.
+    """
+    relay_state = _pulled(config_version=7, restart_epoch=2)
+
+    def pull_config(_url: str, _token: str | None) -> PulledWorkerConfig:
+        return relay_state
+
+    def boot_and_poll() -> bool:
+        """One process lifetime: seed from the boot pull, then poll once."""
+        boot = pull_config("http://relay", "token")
+        check = make_restart_check(
+            "http://relay",
+            "token",
+            RestartDirective.from_pulled(boot),
+            pull_config=pull_config,
+            monotonic=_FakeClock(),
+        )
+        return check()
+
+    assert boot_and_poll() is False, "first boot restarted against an unchanged relay"
+    assert boot_and_poll() is False, "restarted worker restarted again: this is the loop"
+
+    # A boot after a change adopts it rather than restarting onto it.
+    relay_state = _pulled(config_version=8, restart_epoch=2)
+    assert boot_and_poll() is False, "a boot must adopt current config, not restart"
+
+    # But a change that lands *after* boot must still restart, or the fix would
+    # have simply disabled restarts.
+    def boot_stale_then_poll() -> bool:
+        check = make_restart_check(
+            "http://relay",
+            "token",
+            RestartDirective.from_pulled(_pulled(config_version=7, restart_epoch=2)),
+            pull_config=pull_config,
+            monotonic=_FakeClock(),
+        )
+        return check()
+
+    assert boot_stale_then_poll() is True, "a config change after boot must still restart"

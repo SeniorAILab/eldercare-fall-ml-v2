@@ -170,10 +170,33 @@ def main(argv: list[str] | None = None) -> int:
     relay_token = (
         os.environ.get(RELAY_TOKEN_ENV, "").strip() or config.relay.token.get_secret_value()
     )
+    # Seed the restart tracker with the directive this process actually booted
+    # with, not with a literal (0, 0).
+    #
+    # The relay serves `config_version = registry_version`, which is >= 1 as
+    # soon as one camera is registered. Seeding at 0 made the first poll of
+    # every run conclude "the config moved 0 -> 1, restart", so the worker
+    # exited before opening a stream, was restarted, seeded 0 again, and
+    # reached the same conclusion forever. Measured: 0 frames against a real
+    # backend, 40 frames against a relay serving version 0.
+    #
+    # This restores the baseline's semantics: `edge/runtime/edge_worker.py`
+    # seeds `boot_registry_version = startup.registry_version` and restarts
+    # only on `pulled.config_version > boot_registry_version`.
+    #
+    # A failed startup pull falls back to (0, 0) deliberately: an unreachable
+    # relay must not be read as "the config is current", so the first
+    # successful poll after that still triggers one restart onto known config.
+    boot = pull_worker_config(relay_url, relay_token)
+    boot_directive = (
+        RestartDirective(generation=0, version=0)
+        if boot is None
+        else RestartDirective.from_pulled(boot)
+    )
     restart_check = make_restart_check(
         relay_url,
         relay_token,
-        RestartDirective(generation=0, version=0),
+        boot_directive,
         pull_config=pull_worker_config,
     )
 

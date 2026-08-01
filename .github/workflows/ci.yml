@@ -30,6 +30,25 @@ jobs:
       - name: Install FFmpeg test dependency
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg
 
+      # The real-stack E2E fixture publishes a synthetic RTSP stream through
+      # MediaMTX (tests/e2e_worker_relay_fixtures.py). Without it on PATH those
+      # tests error rather than skip, which is deliberate -- a silently skipped
+      # real-stack test is worse than a red one -- so CI has to supply it.
+      # Pinned and checksum-verified: this is a binary fetched from a release,
+      # not an apt package.
+      - name: Install MediaMTX test dependency
+        env:
+          MEDIAMTX_VERSION: "1.9.3"
+          MEDIAMTX_SHA256: "0b885dbfa4ef9c14cd00191c57d90d804255ff50403a28b85ceee7988c535b60"
+        run: |
+          set -euo pipefail
+          url="https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/mediamtx_v${MEDIAMTX_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location "$url" -o /tmp/mediamtx.tar.gz
+          echo "${MEDIAMTX_SHA256}  /tmp/mediamtx.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/mediamtx.tar.gz -C /tmp mediamtx
+          sudo install -m 0755 /tmp/mediamtx /usr/local/bin/mediamtx
+          mediamtx --version
+
       - run: uv sync --frozen --group lint
       - run: uv run pytest -q
       - run: uv run --group lint ruff check .
